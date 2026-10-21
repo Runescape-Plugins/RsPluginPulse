@@ -753,15 +753,11 @@ export async function getTopAuthors(period: Period, limit = 50, game = "runescap
   }));
 }
 
-// Rank of specific authors within a period's leaderboard, without fetching
-// (or sorting, in JS) every author to find them by linear search -- same
-// per-author value as getTopAuthors (primary author only, same excluded
-// tag), just aggregated+ranked in SQL and filtered down to the requested
-// ids before anything crosses the wire. Authors with no ranked plugins at
-// all (e.g. only ever a secondary/co-author) are simply absent from the
-// returned map.
-export async function getAuthorRanks(authorIds: number[], period: Period, game = "runescape"): Promise<Map<number, number>> {
-  if (authorIds.length === 0) return new Map();
+// Shared by getAuthorRanks and getAllAuthorRanks -- the per_author/ranked
+// CTE below always computes a rank for every author in the game regardless
+// of which ids the caller actually wants, so there's no SQL-side cost to
+// returning the full map and filtering (if at all) in JS.
+async function computeAuthorRanks(period: Period, game: string): Promise<Map<number, number>> {
   const pool = getPool();
 
   // RuneLite has no real daily download counter (see getPluginRanks), so its
@@ -789,28 +785,45 @@ export async function getAuthorRanks(authorIds: number[], period: Period, game =
          needsGainJoins
            ? `LEFT JOIN LATERAL (
                 SELECT avg(downloads_total) AS downloads_total
-                FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at >= now() - ($4 * interval '1 day')
+                FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at >= now() - ($3 * interval '1 day')
               ) nowavg ON true
               LEFT JOIN LATERAL (
                 SELECT avg(downloads_total) AS downloads_total
                 FROM plugin_snapshots s WHERE s.plugin_id = p.id
-                  AND s.captured_at BETWEEN now() - (($3 + $4) * interval '1 day') AND now() - (($3 - $4) * interval '1 day')
+                  AND s.captured_at BETWEEN now() - (($2 + $3) * interval '1 day') AND now() - (($2 - $3) * interval '1 day')
               ) b1 ON true
               LEFT JOIN LATERAL (
                 SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at ASC LIMIT 1
               ) b2 ON true`
            : ""
        }
-       WHERE p.game = $2
+       WHERE p.game = $1
        GROUP BY p.author_id
      ),
      ranked AS (
        SELECT author_id, RANK() OVER (ORDER BY value DESC) AS rank FROM per_author
      )
-     SELECT author_id, rank FROM ranked WHERE author_id = ANY($1::int[])`,
-    needsGainJoins ? [authorIds, game, cutoffDays, windowDays] : [authorIds, game],
+     SELECT author_id, rank FROM ranked`,
+    needsGainJoins ? [game, cutoffDays, windowDays] : [game],
   );
   return new Map(rows.map((row) => [row.author_id, Number(row.rank)]));
+}
+
+// Rank of specific authors within a period's leaderboard. Authors with no
+// ranked plugins at all (e.g. only ever a secondary/co-author) are simply
+// absent from the returned map.
+export async function getAuthorRanks(authorIds: number[], period: Period, game = "runescape"): Promise<Map<number, number>> {
+  if (authorIds.length === 0) return new Map();
+  const all = await computeAuthorRanks(period, game);
+  const wanted = new Set(authorIds);
+  return new Map([...all].filter(([authorId]) => wanted.has(authorId)));
+}
+
+// Ranks for every author in the game, for callers (like the author profile
+// route) that want to cache the whole-catalog computation once per game and
+// look authors up out of it, rather than re-running it per author viewed.
+export async function getAllAuthorRanks(period: Period, game = "runescape"): Promise<Map<number, number>> {
+  return computeAuthorRanks(period, game);
 }
 
 // Trending fallback for an empty query, plus a name/author substring
@@ -1162,7 +1175,19 @@ function toPluginRow(row: any, authorSlugs: Map<number, string>): PluginLeaderbo
   };
 }
 
-export async function getAuthorProfile(authorId: number): Promise<AuthorProfile | null> {
+export interface AuthorProfileRankInputs {
+  hotPlugins: PluginLeaderboardRow[];
+  allTimeRanks: Map<number, number>;
+  hotRanks: Map<number, number>;
+  weeklyRanks: Map<number, number>;
+}
+
+// `rankInputs` lets callers that already have (or want to share) these
+// game-wide computations pass them in -- see the authors API route, which
+// caches them per-game rather than paying for this full-catalog fan-out on
+// every author viewed. Callers that don't care (badges, cards, the Discord
+// bot, etc.) can omit it and it's computed the same way it always was.
+export async function getAuthorProfile(authorId: number, rankInputs?: AuthorProfileRankInputs): Promise<AuthorProfile | null> {
   const pool = getPool();
   // Joined via plugin_authors (not plugins.author_id directly) so a
   // co-author's page picks up every plugin they're credited on, not just
@@ -1192,12 +1217,17 @@ export async function getAuthorProfile(authorId: number): Promise<AuthorProfile 
   if (rows.length === 0) return null;
   const game = rows[0].game;
 
-  const [hotPlugins, allTimeRanks, hotRanks, weeklyRanks] = await Promise.all([
-    getTopPlugins("hot", 10, game),
-    getAuthorRanks([authorId], "alltime", game),
-    getAuthorRanks([authorId], "hot", game),
-    getAuthorRanks([authorId], "weekly", game),
-  ]);
+  const { hotPlugins, allTimeRanks, hotRanks, weeklyRanks } =
+    rankInputs ??
+    (await (async () => {
+      const [hotPlugins, allTimeRanks, hotRanks, weeklyRanks] = await Promise.all([
+        getTopPlugins("hot", 10, game),
+        getAuthorRanks([authorId], "alltime", game),
+        getAuthorRanks([authorId], "hot", game),
+        getAuthorRanks([authorId], "weekly", game),
+      ]);
+      return { hotPlugins, allTimeRanks, hotRanks, weeklyRanks };
+    })());
   const hotPluginIds = new Set(hotPlugins.map((p) => p.id));
 
   const plugins = rows.map((row) => ({
