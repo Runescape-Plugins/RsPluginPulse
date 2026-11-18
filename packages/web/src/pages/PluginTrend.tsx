@@ -78,6 +78,7 @@ export function PluginTrend() {
 
   const [hotRank, setHotRank] = useState<number | null>(null);
   const [hotPlugins, setHotPlugins] = useState<PluginLeaderboardRow[] | null>(null);
+  const [allTimeRank, setAllTimeRank] = useState<number | null>(null);
   const [allPlugins, setAllPlugins] = useState<PluginLeaderboardRow[] | null>(null);
   const [showSimilarModal, setShowSimilarModal] = useState(false);
   const [hoveredAuthorIndex, setHoveredAuthorIndex] = useState<number | null>(null);
@@ -89,6 +90,7 @@ export function PluginTrend() {
         setPlugin(res.plugin);
         setPoints(res.trend);
         setGame(res.plugin.game);
+        setAllTimeRank(res.allTimeRank);
 
         getPluginReleases(res.pluginId, res.plugin.game)
           .then((releasesRes) => setReleases(releasesRes.releases))
@@ -113,7 +115,12 @@ export function PluginTrend() {
           })
           .catch(() => {});
 
-        getTopPlugins("alltime", res.plugin.game)
+        // Only for similarPlugins' tag matching below (allTimeRank comes
+        // straight from the trend response now) -- capped at 500 so this
+        // shares a cache entry with the other pages that already fetch the
+        // alltime leaderboard at that same limit, instead of being the one
+        // place on the site asking for the whole catalog.
+        getTopPlugins("alltime", res.plugin.game, 500)
           .then((allRes) => setAllPlugins(allRes.plugins))
           .catch(() => setAllPlugins([]));
       })
@@ -150,12 +157,6 @@ export function PluginTrend() {
           }
         : undefined,
   });
-
-  const allTimeRank = useMemo(() => {
-    if (!allPlugins || !plugin) return null;
-    const index = allPlugins.findIndex((p) => p.id === plugin.id);
-    return index === -1 ? null : index + 1;
-  }, [allPlugins, plugin]);
 
   const similarPlugins = useMemo(() => {
     if (!allPlugins || !plugin) return [];

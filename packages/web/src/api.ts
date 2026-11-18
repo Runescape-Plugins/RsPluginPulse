@@ -307,7 +307,7 @@ export function getPluginInfo(id: string | number, game: Game = "runescape") {
 // ingest snapshots -- "today" (since 00:00 UTC) or "24h" (rolling last day)
 // -- used by the chart's Today/24h zoom buttons.
 export function getPluginTrend(id: string | number, game: Game = "runescape", window?: "today" | "24h") {
-  return getJson<{ pluginId: number; plugin: PluginMeta; trend: PluginTrendPoint[] }>(
+  return getJson<{ pluginId: number; plugin: PluginMeta; trend: PluginTrendPoint[]; allTimeRank: number | null }>(
     `/api/plugins/${encodeURIComponent(id)}/trend?game=${game}${window ? `&window=${window}` : ""}`,
   );
 }

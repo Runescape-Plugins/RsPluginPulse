@@ -63,6 +63,17 @@ CREATE INDEX IF NOT EXISTS plugins_game_idx ON plugins (game);
 -- schema.sql batch for everyone.
 CREATE INDEX IF NOT EXISTS plugins_game_name_id_idx ON plugins (game, name_id);
 
+-- getNewestPlugins/getNewReleases filter by game then ORDER BY date_added
+-- DESC -- without this, that sort has no index to lean on once narrowed to
+-- one game.
+CREATE INDEX IF NOT EXISTS plugins_game_date_added_idx ON plugins (game, date_added DESC);
+
+-- Backs the author-filtered lookups in getCompareData (`p.author_id =
+-- ANY($1)`) and getPluginUpdateCandidates' per-author filter -- same
+-- reasoning as plugin_authors_author_idx below, but for the denormalized
+-- column on plugins itself.
+CREATE INDEX IF NOT EXISTS plugins_author_id_idx ON plugins (author_id);
+
 -- Stable integer ids for entities that don't have a native numeric id
 -- upstream (e.g. RuneLite plugins keyed by internalName, authors keyed by
 -- GitHub login). Minted once per (game, kind, external_key) and reused on
@@ -98,6 +109,13 @@ CREATE TABLE IF NOT EXISTS plugin_authors (
 );
 
 CREATE INDEX IF NOT EXISTS plugin_authors_author_idx ON plugin_authors (author_id);
+
+-- Backs searchPluginsAndAuthors' `name/author_name ILIKE '%...%'` --
+-- without a trigram index those are sequential scans on every keystroke,
+-- since a leading wildcard can't use a plain btree.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS plugins_name_trgm_idx ON plugins USING GIN (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS plugin_authors_author_name_trgm_idx ON plugin_authors USING GIN (author_name gin_trgm_ops);
 
 -- One row per plugin per ingest run. captured_at is shared across every
 -- plugin in a single run so windowed queries compare like-for-like.
@@ -284,6 +302,12 @@ CREATE TABLE IF NOT EXISTS discord_sessions (
 CREATE INDEX IF NOT EXISTS discord_sessions_user_idx ON discord_sessions (discord_user_id);
 
 CREATE INDEX IF NOT EXISTS plugin_releases_plugin_idx ON plugin_releases (plugin_id, released_at);
+
+-- getPluginUpdateCandidates' guild-wide-watch path (no plugin_id/author_id
+-- filter) scans by released_at + kind='update' alone -- plugin_releases_
+-- plugin_idx above is useless without a plugin_id predicate, so this is a
+-- partial index on just the rows that path ever matches.
+CREATE INDEX IF NOT EXISTS plugin_releases_update_released_at_idx ON plugin_releases (released_at) WHERE kind = 'update';
 
 -- Per-guild channel-topic bindings (docs/discord-bot.md's "Channel
 -- description templates"): an admin picks a plugin or author and a

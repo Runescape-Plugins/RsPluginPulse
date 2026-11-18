@@ -75,6 +75,50 @@ export async function getOrCreateExternalId(game: string, kind: "plugin" | "auth
   return rows[0].id;
 }
 
+// Batched getOrCreateExternalId -- RuneLite ingest resolves one id per
+// plugin plus one per co-author name (thousands of entries across the
+// whole catalog), and calling the single-entry version in a loop meant
+// that many sequential round trips every hourly run. Looks up everything
+// that already exists in one query, then inserts only the genuinely new
+// (game, kind, external_key) triples in a second -- same "only burn a
+// sequence value for entries that don't already exist" behavior as the
+// single-entry version above, just batched.
+export async function getOrCreateExternalIds(
+  game: string,
+  entries: { kind: "plugin" | "author"; externalKey: string }[],
+): Promise<Map<string, number>> {
+  if (entries.length === 0) return new Map();
+  const pool = getPool();
+  const keyOf = (e: { kind: string; externalKey: string }) => `${e.kind}:${e.externalKey}`;
+
+  const unique = [...new Map(entries.map((e) => [keyOf(e), e])).values()];
+  const asRecordset = (list: typeof unique) => JSON.stringify(list.map((e) => ({ kind: e.kind, external_key: e.externalKey })));
+
+  const result = new Map<string, number>();
+  const { rows: existingRows } = await pool.query(
+    `SELECT m.kind, m.external_key, m.id
+     FROM external_id_map m
+     WHERE m.game = $1
+       AND (m.kind, m.external_key) IN (SELECT x.kind, x.external_key FROM json_to_recordset($2::json) AS x(kind text, external_key text))`,
+    [game, asRecordset(unique)],
+  );
+  for (const r of existingRows) result.set(keyOf({ kind: r.kind, externalKey: r.external_key }), r.id);
+
+  const missing = unique.filter((e) => !result.has(keyOf(e)));
+  if (missing.length > 0) {
+    const { rows: insertedRows } = await pool.query(
+      `INSERT INTO external_id_map (game, kind, external_key, id)
+       SELECT $1, x.kind, x.external_key, nextval('external_id_seq')
+       FROM json_to_recordset($2::json) AS x(kind text, external_key text)
+       ON CONFLICT (game, kind, external_key) DO UPDATE SET id = external_id_map.id
+       RETURNING kind, external_key, id`,
+      [game, asRecordset(missing)],
+    );
+    for (const r of insertedRows) result.set(keyOf({ kind: r.kind, externalKey: r.external_key }), r.id);
+  }
+  return result;
+}
+
 // So an ingest script can skip re-resolving expensive per-entity metadata
 // (e.g. RuneLite's GitHub repo lookup) for plugins it has already seen.
 export async function getExistingNameIds(game: string): Promise<Set<string>> {
@@ -503,16 +547,13 @@ const CO_AUTHOR_NAMES_SELECT = "COALESCE(co.names, ARRAY[]::text[]) AS co_author
 // one. downloads_today is left on the literal latest row -- it's an "as of
 // now" figure, not subject to the same noise.
 const LATEST_SNAPSHOT_LATERAL = `JOIN LATERAL (
-       SELECT recent.downloads_total, recent.subscribers_total, latest.downloads_today
+       SELECT MAX(downloads_total) AS downloads_total, MAX(subscribers_total) AS subscribers_total,
+              (ARRAY_AGG(downloads_today ORDER BY captured_at DESC))[1] AS downloads_today
        FROM (
-         SELECT downloads_today, captured_at FROM plugin_snapshots s
-         WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) latest
-       JOIN LATERAL (
-         SELECT downloads_total, subscribers_total FROM plugin_snapshots s2
-         WHERE s2.plugin_id = p.id AND s2.captured_at >= latest.captured_at - interval '24 hours'
-         ORDER BY s2.downloads_total DESC, s2.captured_at DESC LIMIT 1
-       ) recent ON true
+         SELECT downloads_total, subscribers_total, downloads_today, captured_at
+         FROM plugin_snapshots s WHERE s.plugin_id = p.id
+         ORDER BY s.captured_at DESC LIMIT 30
+       ) recent
      ) l ON true`;
 
 // Latest snapshot per plugin, ordered by the requested metric.

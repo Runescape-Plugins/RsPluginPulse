@@ -1,4 +1,4 @@
-import { getLatestSnapshotTime, getPlugin, getPluginTrend, getPluginTrendRecent } from "@rspluginpulse/db";
+import { getLatestSnapshotTime, getPlugin, getPluginRanks, getPluginTrend, getPluginTrendRecent } from "@rspluginpulse/db";
 import { CACHE_CEILING, remember, rememberBriefly } from "@/lib/cache";
 import { jsonWithCors, OPTIONS as corsOptions } from "@/lib/cors";
 import { parseGame } from "@/lib/game";
@@ -29,7 +29,11 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
           : window && RECENT_WINDOW_HOURS[window]
             ? await getPluginTrendRecent(pluginId, new Date(Date.now() - RECENT_WINDOW_HOURS[window] * 60 * 60_000).toISOString())
             : await getPluginTrend(pluginId);
-      return { pluginId, plugin, trend };
+      // A targeted RANK() lookup (same one the leaderboards use), not the
+      // page fetching the whole alltime leaderboard just to find its own
+      // position in it.
+      const allTimeRank = (await getPluginRanks([pluginId], "alltime", plugin.game)).get(pluginId) ?? null;
+      return { pluginId, plugin, trend, allTimeRank };
     }),
   );
   if (!result) {

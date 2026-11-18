@@ -1,4 +1,4 @@
-import { getExistingNameIds, getOrCreateExternalId, type CoAuthorIngest, type IngestedMod } from "@rspluginpulse/db";
+import { getExistingNameIds, getOrCreateExternalIds, type CoAuthorIngest, type IngestedMod } from "@rspluginpulse/db";
 
 // RuneLite exposes no API key / auth, and no cumulative download counter --
 // `pluginhub` is a live gauge of currently-reporting installs, not a total.
@@ -163,27 +163,38 @@ export async function fetchAllRuneLitePlugins(): Promise<IngestedMod[]> {
   const unresolved = active.map((p) => p.internalName).filter((name) => !existing.has(name));
   const ownerMap = unresolved.length > 0 ? await resolveRepoOwners(unresolved) : new Map<string, string>();
 
+  // buildAuthorList is pure/sync, so the per-plugin co-author lists can all
+  // be worked out up front -- that's what lets every external id this run
+  // needs (one per plugin, one per co-author name, thousands total across
+  // the catalog) be resolved in a single batched round trip below instead
+  // of one getOrCreateExternalId call per plugin and per co-author name.
+  const namesByPlugin = new Map(active.map((p) => [p.internalName, buildAuthorList(p.author, ownerMap.get(p.internalName))]));
+  const idEntries: { kind: "plugin" | "author"; externalKey: string }[] = [
+    ...active.map((p) => ({ kind: "plugin" as const, externalKey: p.internalName })),
+    ...[...namesByPlugin.values()].flat().map((name) => ({ kind: "author" as const, externalKey: name })),
+  ];
+  const ids = await getOrCreateExternalIds("runelite", idEntries);
+
   const mods: IngestedMod[] = [];
   for (const p of active) {
-    const id = await getOrCreateExternalId("runelite", "plugin", p.internalName);
+    const id = ids.get(`plugin:${p.internalName}`)!;
     const verifiedOwner = ownerMap.get(p.internalName);
-    const names = buildAuthorList(p.author, verifiedOwner);
+    const names = namesByPlugin.get(p.internalName)!;
     const installCount = installCounts[p.internalName] ?? 0;
 
-    const coAuthors: CoAuthorIngest[] = [];
-    for (const name of names) {
-      const authorId = await getOrCreateExternalId("runelite", "author", name);
+    const coAuthors: CoAuthorIngest[] = names.map((name) => {
+      const authorId = ids.get(`author:${name}`)!;
       // Only the repo-verified owner, or a name shaped like a real GitHub
       // handle, gets an avatar/profile guess -- casual co-author credits
       // ("Darts", "JC A") aren't guaranteed to be real logins.
       const isResolvable = name === verifiedOwner || GITHUB_USERNAME_RE.test(name);
-      coAuthors.push({
+      return {
         authorId,
         name,
         avatarUrl: isResolvable ? `https://github.com/${name}.png` : null,
         profileUrl: isResolvable ? `https://github.com/${name}` : null,
-      });
-    }
+      };
+    });
     const primary = coAuthors[0];
 
     mods.push({

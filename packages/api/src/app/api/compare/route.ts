@@ -1,4 +1,5 @@
-import { getCompareData, type CompareMetric, type CompareRange, type CompareType } from "@rspluginpulse/db";
+import { getCompareData, getLatestSnapshotTime, type CompareMetric, type CompareRange, type CompareType } from "@rspluginpulse/db";
+import { CACHE_CEILING, remember, rememberBriefly } from "@/lib/cache";
 import { jsonWithCors, OPTIONS as corsOptions } from "@/lib/cors";
 import { isInt4 } from "@/lib/validate";
 
@@ -40,6 +41,10 @@ export async function GET(request: Request) {
     return jsonWithCors({ error: { status: 400, message: "keys accepts at most 4 ids" } }, { status: 400 });
   }
 
-  const result = await getCompareData(type, keys, metric, range);
+  const freshness = (await rememberBriefly("freshness:global", () => getLatestSnapshotTime())) ?? "none";
+  const sortedKeys = [...keys].sort((a, b) => a - b).join(",");
+  const result = await remember(`compare:${type}:${metric}:${range}:${sortedKeys}`, CACHE_CEILING.ENTITY, freshness, () =>
+    getCompareData(type, keys, metric, range),
+  );
   return jsonWithCors(result);
 }
