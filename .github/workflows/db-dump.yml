@@ -1,0 +1,83 @@
+name: Database Dump
+
+# Manual-only: run from the Actions tab whenever you need a full pg_dump of
+# the production database to look at or restore locally. There's no
+# automated backup job (see deploy/README.md's "Not set up yet" section --
+# the ingested data is re-derivable from mod.io/RuneLite, so this exists for
+# ad-hoc need, not disaster recovery.
+#
+# The dump never touches disk on the server beyond what pg_dump/gzip stream
+# through SSH, and never gets uploaded anywhere public -- it comes back as a
+# short-retention GitHub Actions artifact, downloadable only by someone
+# logged into this repo, and deleted automatically once it expires.
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: "Days before the artifact (and the dump) is deleted"
+        required: false
+        default: "1"
+
+concurrency:
+  group: db-dump
+  cancel-in-progress: false
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          echo "scanning $SSH_HOST port $SSH_PORT ..."
+          ssh-keyscan -T 10 -p "$SSH_PORT" "$SSH_HOST" > /tmp/scanned 2>/tmp/scanerr || true
+          if [ -n "$SSH_KNOWN_HOSTS" ]; then
+            printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          elif [ -s /tmp/scanned ]; then
+            echo "::warning::SSH_KNOWN_HOSTS not set — trusting the key seen now"
+            cp /tmp/scanned ~/.ssh/known_hosts
+          else
+            echo "::error::could not reach $SSH_HOST:$SSH_PORT to read its host key"
+            exit 1
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      # pg_dump and gzip both run on the server -- only their piped stdout
+      # ever crosses the wire, so DATABASE_URL (which never leaves the
+      # server, see deploy/README.md) stays there too.
+      - name: Dump database over SSH
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT || 22 }}
+        run: |
+          set -euo pipefail
+          FILENAME="rspluginpulse-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+          echo "FILENAME=$FILENAME" >> "$GITHUB_ENV"
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" \
+            'pg_dump --no-owner --no-privileges "$(cat /srv/rspluginpulse/shared/database_url)" | gzip' \
+            > "$FILENAME"
+          echo "dump size: $(du -h "$FILENAME" | cut -f1)"
+
+      - name: Upload dump as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FILENAME }}
+          path: ${{ env.FILENAME }}
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+
+      - name: Link to the download
+        run: |
+          echo "### Database dump ready" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download it from this run's **Artifacts** section above (expires in ${{ inputs.retention_days }} day(s))." >> "$GITHUB_STEP_SUMMARY"

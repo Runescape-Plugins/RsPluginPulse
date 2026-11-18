@@ -8,3 +8,4 @@ packages/web/dist/
 packages/api/.cache/
 /tmp-mariadb-bench
 packages/ingest/tmp/
+shh.txt
