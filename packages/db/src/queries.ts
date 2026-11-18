@@ -257,9 +257,7 @@ export async function getNewestPlugins(limit = 50, game = "runescape"): Promise<
   const { rows } = await pool.query(
     `SELECT p.id, p.name_id, p.name, p.author_id, p.author_name, p.profile_url, p.tags, p.logo_url, p.date_added, l.downloads_total, ${CO_AUTHOR_NAMES_SELECT}
      FROM plugins p
-     JOIN LATERAL (
-       SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      ${CO_AUTHOR_NAMES_JOIN}
      WHERE p.game = $2
      ORDER BY p.date_added DESC
@@ -302,12 +300,12 @@ export async function getSiteStats(game = "runescape"): Promise<SiteStats> {
        (SELECT count(DISTINCT author_id)::int FROM plugins WHERE game = $1) AS author_count,
        (SELECT COALESCE(SUM(l.downloads_total), 0)::bigint
           FROM plugins p
-          JOIN LATERAL (SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+          ${LATEST_SNAPSHOT_LATERAL}
           WHERE p.game = $1
        ) AS downloads_total,
        (SELECT COALESCE(SUM(l.subscribers_total), 0)::bigint
           FROM plugins p
-          JOIN LATERAL (SELECT subscribers_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+          ${LATEST_SNAPSHOT_LATERAL}
           WHERE p.game = $1
        ) AS subscribers_total,
        (SELECT max(s.captured_at) FROM plugin_snapshots s WHERE s.game = $1) AS updated_at`,
@@ -498,15 +496,32 @@ const CO_AUTHOR_NAMES_JOIN = `
      ) co ON true`;
 const CO_AUTHOR_NAMES_SELECT = "COALESCE(co.names, ARRAY[]::text[]) AS co_author_names";
 
+// RuneLite's downloads_total/subscribers_total gauge dips 5-10% every night
+// around 00:00 UTC (see gainWindowDays above), so the single newest snapshot
+// is often mid-dip. Using the highest value seen in the trailing 24h instead
+// rides through that dip with a real recorded snapshot, never a fabricated
+// one. downloads_today is left on the literal latest row -- it's an "as of
+// now" figure, not subject to the same noise.
+const LATEST_SNAPSHOT_LATERAL = `JOIN LATERAL (
+       SELECT recent.downloads_total, recent.subscribers_total, latest.downloads_today
+       FROM (
+         SELECT downloads_today, captured_at FROM plugin_snapshots s
+         WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
+       ) latest
+       JOIN LATERAL (
+         SELECT downloads_total, subscribers_total FROM plugin_snapshots s2
+         WHERE s2.plugin_id = p.id AND s2.captured_at >= latest.captured_at - interval '24 hours'
+         ORDER BY s2.downloads_total DESC, s2.captured_at DESC LIMIT 1
+       ) recent ON true
+     ) l ON true`;
+
 // Latest snapshot per plugin, ordered by the requested metric.
 async function topPluginsByLatestMetric(metric: "downloads_total" | "downloads_today", game: string, limit: number): Promise<PluginLeaderboardRow[]> {
   const pool = getPool();
   const { rows } = await pool.query(
     `SELECT p.id, p.name_id, p.name, p.author_id, p.author_name, p.author_avatar_url, p.profile_url, p.tags, l.${metric} AS value, ${CO_AUTHOR_NAMES_SELECT}
      FROM plugins p
-     JOIN LATERAL (
-       SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      ${CO_AUTHOR_NAMES_JOIN}
      WHERE p.game = $2
      ORDER BY value DESC
@@ -528,9 +543,7 @@ async function topPluginsByGain(cutoffDays: number, game: string, limit: number)
             ROUND(COALESCE(nowavg.downloads_total, l.downloads_total) - COALESCE(b1.downloads_total, b2.downloads_total, l.downloads_total)) AS value,
             ${CO_AUTHOR_NAMES_SELECT}
      FROM plugins p
-     JOIN LATERAL (
-       SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      LEFT JOIN LATERAL (
        SELECT avg(downloads_total) AS downloads_total
        FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at >= now() - ($4 * interval '1 day')
@@ -577,9 +590,7 @@ export async function getPluginRanks(pluginIds: number[], metric: "alltime" | "h
     `WITH ranked AS (
        SELECT p.id, RANK() OVER (ORDER BY ${valueSql} DESC) AS rank
        FROM plugins p
-       JOIN LATERAL (
-         SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        ${
          isHotGain
            ? `LEFT JOIN LATERAL (
@@ -628,9 +639,7 @@ export async function getFastestGrowingPlugins(limit = 5, cutoffDays = 7, game =
             ) AS growth_score,
             ${CO_AUTHOR_NAMES_SELECT}
      FROM plugins p
-     JOIN LATERAL (
-       SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      LEFT JOIN LATERAL (
        SELECT avg(downloads_total) AS downloads_total, avg(subscribers_total) AS subscribers_total
        FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at >= now() - ($4 * interval '1 day')
@@ -711,9 +720,7 @@ export async function getTopAuthors(period: Period, limit = 50, game = "runescap
     `WITH per_plugin AS (
        SELECT p.author_id, p.author_name, p.author_avatar_url, ${valueSql} AS value
        FROM plugins p
-       JOIN LATERAL (
-         SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        ${
          needsGainJoins
            ? `LEFT JOIN LATERAL (
@@ -778,9 +785,7 @@ async function computeAuthorRanks(period: Period, game: string): Promise<Map<num
     `WITH per_author AS (
        SELECT p.author_id, SUM(${valueSql}) AS value
        FROM plugins p
-       JOIN LATERAL (
-         SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        ${
          needsGainJoins
            ? `LEFT JOIN LATERAL (
@@ -888,9 +893,7 @@ export async function searchPluginsAndAuthors(
   const pluginsResult = await pool.query(
     `SELECT p.id, p.name_id, p.name, p.author_name, p.author_avatar_url, l.downloads_total AS total
      FROM plugins p
-     JOIN LATERAL (
-       SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      WHERE p.game = $2
        AND (
          p.name ILIKE '%' || $1 || '%'
@@ -909,9 +912,7 @@ export async function searchPluginsAndAuthors(
               COUNT(DISTINCT pa.plugin_id) AS plugin_count, SUM(l.downloads_total) AS total
        FROM plugin_authors pa
        JOIN plugins p ON p.id = pa.plugin_id
-       JOIN LATERAL (
-         SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        WHERE p.game = $2
        GROUP BY pa.author_id
      )
@@ -1043,9 +1044,7 @@ export async function getPluginInfo(pluginId: number): Promise<PluginInfo | null
             p.date_added, p.date_updated,
             l.downloads_total, l.downloads_today, l.subscribers_total
      FROM plugins p
-     JOIN LATERAL (
-       SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      WHERE p.id = $1`,
     [pluginId],
   );
@@ -1199,9 +1198,7 @@ export async function getAuthorProfile(authorId: number, rankInputs?: AuthorProf
             l.downloads_total - COALESCE(b1.downloads_total, b2.downloads_total, l.downloads_total) AS weekly_gain
      FROM plugin_authors pa
      JOIN plugins p ON p.id = pa.plugin_id
-     JOIN LATERAL (
-       SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-     ) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      LEFT JOIN LATERAL (
        SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at <= now() - interval '7 days'
        ORDER BY s.captured_at DESC LIMIT 1
@@ -1399,9 +1396,7 @@ async function getAllCategoryStats(game: string): Promise<CategoryStat[]> {
               l.downloads_total,
               l.downloads_total - COALESCE(b1.downloads_total, b2.downloads_total, l.downloads_total) AS week_gain
        FROM plugins p
-       JOIN LATERAL (
-         SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1
-       ) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        LEFT JOIN LATERAL (
          SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at <= now() - interval '7 days'
          ORDER BY s.captured_at DESC LIMIT 1
@@ -1451,7 +1446,7 @@ async function getFastestGrowingWithSpark(limit: number, game: string): Promise<
             b7.downloads_total AS total_7,
             b14.downloads_total AS total_14
      FROM plugins p
-     JOIN LATERAL (SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      LEFT JOIN LATERAL (
        SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at <= now() - interval '7 days'
        ORDER BY s.captured_at DESC LIMIT 1
@@ -1494,7 +1489,7 @@ async function getNewReleases(limit: number, withinDays: number, game: string): 
   const pool = getPool();
   const recentQuery = `SELECT p.id, p.name_id, p.name, p.author_id, p.author_name, p.date_added, l.downloads_total
      FROM plugins p
-     JOIN LATERAL (SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+     ${LATEST_SNAPSHOT_LATERAL}
      WHERE p.game = $3 AND p.date_added >= now() - ($2 * interval '1 day')
      ORDER BY p.date_added DESC
      LIMIT $1`;
@@ -1504,7 +1499,7 @@ async function getNewReleases(limit: number, withinDays: number, game: string): 
     ({ rows } = await pool.query(
       `SELECT p.id, p.name_id, p.name, p.author_id, p.author_name, p.date_added, l.downloads_total
        FROM plugins p
-       JOIN LATERAL (SELECT downloads_total FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+       ${LATEST_SNAPSHOT_LATERAL}
        WHERE p.game = $2
        ORDER BY p.date_added DESC
        LIMIT $1`,
@@ -1670,7 +1665,7 @@ const COMPARE_STATS_FIELDS = `
      COALESCE(b7.downloads_total, b7f.downloads_total, l.downloads_total) AS total_7,
      COALESCE(b30.downloads_total, b30f.downloads_total, l.downloads_total) AS total_30
    FROM plugins p
-   JOIN LATERAL (SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at DESC LIMIT 1) l ON true
+   ${LATEST_SNAPSHOT_LATERAL}
    LEFT JOIN LATERAL (SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at <= now() - interval '7 days' ORDER BY s.captured_at DESC LIMIT 1) b7 ON true
    LEFT JOIN LATERAL (SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id ORDER BY s.captured_at ASC LIMIT 1) b7f ON true
    LEFT JOIN LATERAL (SELECT * FROM plugin_snapshots s WHERE s.plugin_id = p.id AND s.captured_at <= now() - interval '30 days' ORDER BY s.captured_at DESC LIMIT 1) b30 ON true
