@@ -153,16 +153,6 @@ function readBoolParam(params: URLSearchParams, key: string): boolean {
   return params.get(key) !== "0";
 }
 
-function smoothNightlyDip(points: PluginTrendPoint[]): PluginTrendPoint[] {
-  let maxTotal = -Infinity;
-  let maxSubs = -Infinity;
-  return points.map((p) => {
-    maxTotal = Math.max(maxTotal, p.downloadsTotal);
-    maxSubs = Math.max(maxSubs, p.subscribersTotal);
-    return { ...p, downloadsTotal: maxTotal, subscribersTotal: maxSubs };
-  });
-}
-
 export function TrendChart({
   points,
   pluginId,
@@ -213,12 +203,6 @@ export function TrendChart({
     };
   }, [range, pluginId, game]);
   const isRecent = range === "today" || range === "24h";
-  const isRunelite = game === "runelite";
-  const [smoothDip, setSmoothDip] = useState(() => readBoolParam(initial, "smooth"));
-  const displayedRecentPoints = useMemo(
-    () => (recentPoints && isRunelite && smoothDip ? smoothNightlyDip(recentPoints) : recentPoints),
-    [recentPoints, isRunelite, smoothDip],
-  );
   const [zoom, setZoomState] = useState<Win | null>(() => {
     const from = initial.get("from"),
       to = initial.get("to");
@@ -275,13 +259,12 @@ export function TrendChart({
       up: layers.up ? null : "0",
       rel: layers.rel ? null : "0",
       ms: layers.ms ? null : "0",
-      smooth: smoothDip ? null : "0",
       from: zoom ? isoDay(points, zoom.a) : null,
       to: zoom ? isoDay(points, zoom.b) : null,
       sel: sel ? `${isoDay(points, sel.a)}_${isoDay(points, sel.b)}` : null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartType, range, sens, layers, smoothDip, zoom, sel, dragMode]);
+  }, [chartType, range, sens, layers, zoom, sel, dragMode]);
 
   // ---------- Window / zoom ----------
   const lastIndex = points.length - 1;
@@ -766,9 +749,6 @@ export function TrendChart({
             <ChartSettingsMenu
               open={settingsOpen}
               annotationsDisabled={isRecent}
-              showDipSmoothing={isRecent && isRunelite}
-              dipSmoothing={smoothDip}
-              onDipSmoothingChange={setSmoothDip}
               onToggle={() => {
                 setSettingsOpen((o) => !o);
                 setCalOpen(false);
@@ -788,7 +768,7 @@ export function TrendChart({
       </header>
 
       {isRecent ? (
-        <RecentPlot points={displayedRecentPoints} loading={recentLoading} metric={metric} unit={unit} metricLabel={metricLabel} range={range} chartType={chartType} />
+        <RecentPlot points={recentPoints} loading={recentLoading} metric={metric} unit={unit} metricLabel={metricLabel} range={range} chartType={chartType} />
       ) : (
         <>
       <div className="ppc-plotwrap">

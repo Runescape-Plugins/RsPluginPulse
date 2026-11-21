@@ -83,6 +83,14 @@ export function PluginTrend() {
   const [showSimilarModal, setShowSimilarModal] = useState(false);
   const [hoveredAuthorIndex, setHoveredAuthorIndex] = useState<number | null>(null);
 
+  // Raw, un-bucketed snapshots backing the "Change today" tile's hourly/daily
+  // toggle below -- the daily `points` series is forward-filled to one dot
+  // per day, too coarse to find "the snapshot closest to noon" or "an hour
+  // ago". Only RuneLite shows that tile (see todayChange further down), so
+  // only RuneLite fetches this.
+  const [rawPoints, setRawPoints] = useState<PluginTrendPoint[] | null>(null);
+  const [changeMode, setChangeMode] = useState<"hourly" | "daily">("daily");
+
   useEffect(() => {
     if (!id) return;
     getPluginTrend(id, game)
@@ -95,6 +103,14 @@ export function PluginTrend() {
         getPluginReleases(res.pluginId, res.plugin.game)
           .then((releasesRes) => setReleases(releasesRes.releases))
           .catch(() => setReleases([]));
+
+        // Only RuneLite's live install gauge shows the "Change today" tile
+        // (see todayChange below) -- mod.io plugins don't need this fetch.
+        if (res.plugin.game === "runelite") {
+          getPluginTrend(res.pluginId, res.plugin.game, "48h")
+            .then((rawRes) => setRawPoints(rawRes.trend))
+            .catch(() => setRawPoints([]));
+        }
 
         if (res.trend.length > 0) {
           const from = res.trend[0].capturedAt.slice(0, 10);
@@ -240,10 +256,10 @@ export function PluginTrend() {
   const tiles = metrics.map((m) => ({ ...m, ...tileValueAndSub(points, m.key) }));
   // RuneLite has no real daily figure (downloadsToday is always 0, see
   // runelite.ts) -- a real "today" number for that plugin's live install
-  // gauge is the change since ~24h ago instead, same basis findPointNear
-  // already uses for the other tiles' "gained" sub-labels. Display-only,
-  // not a selectable chart metric (there's no "change" series to plot).
-  const todayChange = plugin.game === "runelite" ? smoothedGain(points, 1) : null;
+  // gauge is the raw/hourly or noon-to-noon change instead (see
+  // hourlyChange/dailyChange below). Display-only, not a selectable chart
+  // metric (there's no "change" series to plot).
+  const todayChange = plugin.game === "runelite" ? (changeMode === "hourly" ? hourlyChange(rawPoints ?? []) : dailyChange(rawPoints ?? [])) : null;
   // Same idea as todayChange, just over 30 days -- a monthly figure that
   // actually means something for a live gauge, unlike subscribersTotal
   // (which used to sit here as a redundant duplicate of Total installs).
@@ -437,16 +453,35 @@ export function PluginTrend() {
                 <span className="metric-tile-sub">{t.sub}</span>
               </div>
             ))}
-        {todayChange !== null && (
+        {plugin.game === "runelite" && (
           <div className="metric-tile">
             <span className="metric-tile-top">
-              <span className="metric-tile-label">Change today</span>
+              <span className="metric-tile-label">Change</span>
+              <div className="ppc-seg" role="radiogroup" aria-label="Change period">
+                <button type="button" role="radio" aria-checked={changeMode === "hourly"} onClick={() => setChangeMode("hourly")}>
+                  Hourly
+                </button>
+                <button type="button" role="radio" aria-checked={changeMode === "daily"} onClick={() => setChangeMode("daily")}>
+                  Daily
+                </button>
+              </div>
             </span>
-            <span className="metric-tile-value">
-              {todayChange >= 0 ? "+" : ""}
-              {todayChange.toLocaleString()}
-            </span>
-            <span className="metric-tile-sub">vs. this time yesterday</span>
+            {todayChange !== null ? (
+              <>
+                <span className="metric-tile-value">
+                  {todayChange >= 0 ? "+" : ""}
+                  {todayChange.toLocaleString()}
+                </span>
+                <span className="metric-tile-sub">
+                  {changeMode === "hourly" ? "vs. about an hour ago" : "noon vs. noon yesterday (UTC)"}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="metric-tile-value">—</span>
+                <span className="metric-tile-sub">Not enough history yet</span>
+              </>
+            )}
           </div>
         )}
         {monthlyChange !== null && (
@@ -588,5 +623,52 @@ function averageTrailing(points: PluginTrendPoint[], windowDays: number): number
 function smoothedGain(points: PluginTrendPoint[], cutoffDays: number): number {
   const windowDays = gainWindowDays(cutoffDays);
   return Math.round(averageTrailing(points, windowDays) - averageNear(points, cutoffDays, windowDays));
+}
+
+// Last raw snapshot at or before `targetMs`, scanning the (chronologically
+// ordered) raw/un-bucketed snapshots -- the daily-bucket equivalent of
+// findPointNear above, just not limited to one point per calendar day.
+function snapshotAtOrBefore(raw: PluginTrendPoint[], targetMs: number): PluginTrendPoint | null {
+  let candidate: PluginTrendPoint | null = null;
+  for (const p of raw) {
+    if (new Date(p.capturedAt).getTime() <= targetMs) candidate = p;
+  }
+  return candidate;
+}
+
+// The most recently completed UTC noon at or before `beforeMs`.
+function priorNoonUtc(beforeMs: number): number {
+  const d = new Date(beforeMs);
+  const noon = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12, 0, 0, 0);
+  return noon <= beforeMs ? noon : noon - 24 * 60 * 60 * 1000;
+}
+
+// Noon-to-noon UTC change on the raw install gauge -- both endpoints sit at
+// the same time of day, a day apart, so a plugin-hub ingest delay (which can
+// leave "right now" lagging behind the real current count) shifts both sides
+// of the diff by roughly the same amount instead of comparing a half-updated
+// "now" against a fully-settled "yesterday". Needs raw snapshots covering up
+// to ~48h back (see the "48h" window in api.ts/route.ts) -- worst case is
+// "now" sitting a minute before today's noon, making yesterday's noon the
+// most recent completed one and the day before that the one before it.
+function dailyChange(raw: PluginTrendPoint[]): number | null {
+  if (raw.length === 0) return null;
+  const noon1 = priorNoonUtc(Date.now());
+  const noon0 = noon1 - 24 * 60 * 60 * 1000;
+  const p1 = snapshotAtOrBefore(raw, noon1);
+  const p0 = snapshotAtOrBefore(raw, noon0);
+  if (!p1 || !p0) return null;
+  return Math.round(p1.downloadsTotal - p0.downloadsTotal);
+}
+
+// Latest raw snapshot vs. the snapshot closest to an hour before it --
+// the most immediate read of the gauge's movement, for when noon-to-noon
+// feels too stale.
+function hourlyChange(raw: PluginTrendPoint[]): number | null {
+  if (raw.length === 0) return null;
+  const last = raw[raw.length - 1];
+  const prior = snapshotAtOrBefore(raw, new Date(last.capturedAt).getTime() - 60 * 60 * 1000);
+  if (!prior) return null;
+  return Math.round(last.downloadsTotal - prior.downloadsTotal);
 }
 

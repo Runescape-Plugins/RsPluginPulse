@@ -304,9 +304,10 @@ export function getPluginInfo(id: string | number, game: Game = "runescape") {
 // those. Always sent; the API ignores it for a numeric id.
 //
 // `window` swaps the usual one-point-per-day series for raw, un-bucketed
-// ingest snapshots -- "today" (since 00:00 UTC) or "24h" (rolling last day)
-// -- used by the chart's Today/24h zoom buttons.
-export function getPluginTrend(id: string | number, game: Game = "runescape", window?: "today" | "24h") {
+// ingest snapshots -- "today" (since 00:00 UTC), "24h" (rolling last day,
+// used by the chart's Today/24h zoom buttons) or "48h" (rolling last two
+// days, used by PluginTrend.tsx's hourly/daily "Change today" tile).
+export function getPluginTrend(id: string | number, game: Game = "runescape", window?: "today" | "24h" | "48h") {
   return getJson<{ pluginId: number; plugin: PluginMeta; trend: PluginTrendPoint[]; allTimeRank: number | null }>(
     `/api/plugins/${encodeURIComponent(id)}/trend?game=${game}${window ? `&window=${window}` : ""}`,
   );

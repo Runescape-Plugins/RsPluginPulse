@@ -9,13 +9,6 @@ interface Props {
   // sections and the sensitivity slider, not the whole menu. Chart type
   // and export still apply to any series, recent or daily.
   annotationsDisabled?: boolean;
-  // Only true for RuneLite while viewing Today/24h -- that's the one
-  // combination where the raw install gauge's nightly dip-and-recover shows
-  // up as a visible cliff (see smoothNightlyDip in TrendChart.tsx). Hidden
-  // entirely for mod.io plugins, whose cumulative downloads never dip.
-  showDipSmoothing?: boolean;
-  dipSmoothing?: boolean;
-  onDipSmoothingChange?: (value: boolean) => void;
   onToggle: () => void;
   chartType: ChartType;
   onChartTypeChange: (type: ChartType) => void;
@@ -78,9 +71,6 @@ const LAYERS: { key: keyof AnnotationLayers; label: string; sub: (releaseFromLab
 export function ChartSettingsMenu({
   open,
   annotationsDisabled,
-  showDipSmoothing,
-  dipSmoothing,
-  onDipSmoothingChange,
   onToggle,
   chartType,
   onChartTypeChange,
@@ -120,27 +110,6 @@ export function ChartSettingsMenu({
 
           {annotationsDisabled ? (
             <div className="ppc-sec">
-              {showDipSmoothing && (
-                <label className="ppc-layer">
-                  <span className="ppc-layer-ic">
-                    <svg width={18} height={18} viewBox="0 0 18 18">
-                      <path d="M2 13L6 7L10 10L16 3" fill="none" stroke="var(--raise)" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  </span>
-                  <span className="ppc-layer-txt">
-                    <span className="ppc-layer-label">Smooth nightly dip</span>
-                    <span className="ppc-small">Bridges RuneLite&rsquo;s ~00:00 UTC install-count dip using real recorded values</span>
-                  </span>
-                  <button
-                    type="button"
-                    className="ppc-switch"
-                    role="switch"
-                    aria-checked={dipSmoothing}
-                    aria-label="Smooth nightly dip"
-                    onClick={() => onDipSmoothingChange?.(!dipSmoothing)}
-                  />
-                </label>
-              )}
               <span className="ppc-note">Annotations and marker sensitivity aren&rsquo;t available for Today/24h -- there&rsquo;s no daily data to annotate.</span>
             </div>
           ) : (

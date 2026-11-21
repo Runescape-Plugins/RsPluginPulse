@@ -10,7 +10,13 @@ export const OPTIONS = corsOptions;
 // getPluginTrend's one-point-per-day forward-fill -- see
 // getPluginTrendRecent. Anything else (including no param) keeps the
 // existing daily series untouched.
-const RECENT_WINDOW_HOURS: Record<string, number> = { "24h": 24 };
+//
+// "48h" is for PluginTrend.tsx's hourly/daily "Change today" tile -- a
+// noon-to-noon daily comparison needs snapshots as far back as just under
+// 48h (worst case: "now" sitting a minute before today's noon, which makes
+// yesterday's noon the most recent completed one and the day before that
+// the one before it).
+const RECENT_WINDOW_HOURS: Record<string, number> = { "24h": 24, "48h": 48 };
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
