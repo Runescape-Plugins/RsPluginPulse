@@ -83,13 +83,12 @@ export function PluginTrend() {
   const [showSimilarModal, setShowSimilarModal] = useState(false);
   const [hoveredAuthorIndex, setHoveredAuthorIndex] = useState<number | null>(null);
 
-  // Raw, un-bucketed snapshots backing the "Change today" tile's hourly/daily
-  // toggle below -- the daily `points` series is forward-filled to one dot
-  // per day, too coarse to find "the snapshot closest to noon" or "an hour
-  // ago". Only RuneLite shows that tile (see todayChange further down), so
-  // only RuneLite fetches this.
+  // Raw, un-bucketed snapshots backing the "Change today" tile's noon-to-noon
+  // UTC comparison below -- the daily `points` series is forward-filled to
+  // one dot per day, too coarse to find "the snapshot closest to noon". Only
+  // RuneLite shows that tile (see todayChange further down), so only
+  // RuneLite fetches this.
   const [rawPoints, setRawPoints] = useState<PluginTrendPoint[] | null>(null);
-  const [changeMode, setChangeMode] = useState<"hourly" | "daily">("daily");
 
   useEffect(() => {
     if (!id) return;
@@ -256,10 +255,10 @@ export function PluginTrend() {
   const tiles = metrics.map((m) => ({ ...m, ...tileValueAndSub(points, m.key) }));
   // RuneLite has no real daily figure (downloadsToday is always 0, see
   // runelite.ts) -- a real "today" number for that plugin's live install
-  // gauge is the raw/hourly or noon-to-noon change instead (see
-  // hourlyChange/dailyChange below). Display-only, not a selectable chart
-  // metric (there's no "change" series to plot).
-  const todayChange = plugin.game === "runelite" ? (changeMode === "hourly" ? hourlyChange(rawPoints ?? []) : dailyChange(rawPoints ?? [])) : null;
+  // gauge is the noon-to-noon UTC change instead (see dailyChange below).
+  // Display-only, not a selectable chart metric (there's no "change" series
+  // to plot).
+  const todayChange = plugin.game === "runelite" ? dailyChange(rawPoints ?? []) : null;
   // Same idea as todayChange, just over 30 days -- a monthly figure that
   // actually means something for a live gauge, unlike subscribersTotal
   // (which used to sit here as a redundant duplicate of Total installs).
@@ -456,15 +455,7 @@ export function PluginTrend() {
         {plugin.game === "runelite" && (
           <div className="metric-tile">
             <span className="metric-tile-top">
-              <span className="metric-tile-label">Change</span>
-              <div className="ppc-seg" role="radiogroup" aria-label="Change period">
-                <button type="button" role="radio" aria-checked={changeMode === "hourly"} onClick={() => setChangeMode("hourly")}>
-                  Hourly
-                </button>
-                <button type="button" role="radio" aria-checked={changeMode === "daily"} onClick={() => setChangeMode("daily")}>
-                  Daily
-                </button>
-              </div>
+              <span className="metric-tile-label">Change today</span>
             </span>
             {todayChange !== null ? (
               <>
@@ -472,9 +463,7 @@ export function PluginTrend() {
                   {todayChange >= 0 ? "+" : ""}
                   {todayChange.toLocaleString()}
                 </span>
-                <span className="metric-tile-sub">
-                  {changeMode === "hourly" ? "vs. about an hour ago" : "noon vs. noon yesterday (UTC)"}
-                </span>
+                <span className="metric-tile-sub">noon vs. noon yesterday (UTC)</span>
               </>
             ) : (
               <>
@@ -659,16 +648,5 @@ function dailyChange(raw: PluginTrendPoint[]): number | null {
   const p0 = snapshotAtOrBefore(raw, noon0);
   if (!p1 || !p0) return null;
   return Math.round(p1.downloadsTotal - p0.downloadsTotal);
-}
-
-// Latest raw snapshot vs. the snapshot closest to an hour before it --
-// the most immediate read of the gauge's movement, for when noon-to-noon
-// feels too stale.
-function hourlyChange(raw: PluginTrendPoint[]): number | null {
-  if (raw.length === 0) return null;
-  const last = raw[raw.length - 1];
-  const prior = snapshotAtOrBefore(raw, new Date(last.capturedAt).getTime() - 60 * 60 * 1000);
-  if (!prior) return null;
-  return Math.round(last.downloadsTotal - prior.downloadsTotal);
 }
 
